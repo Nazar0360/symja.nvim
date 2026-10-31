@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.matheclipse.core.eval.EvalEngine;
 import org.matheclipse.core.eval.ExprEvaluator;
 import org.matheclipse.core.eval.TeXUtilities;
+import org.matheclipse.core.expression.Context;
+import org.matheclipse.core.expression.ContextPath;
 import org.matheclipse.core.expression.S;
 import org.matheclipse.core.interfaces.IExpr;
 import org.matheclipse.core.interfaces.ISymbol;
@@ -40,8 +42,15 @@ public final class SymjaBridge {
     private static final Pattern DEFINITION_NAME = Pattern.compile(
             "(?m)(?:^|[;\\n])\\s*([\\p{L}$][\\p{L}\\p{N}$]*)\\s*(?:(?:\\([^;\\n]*\\))|(?:\\[[^;\\n]*\\]))?\\s*(?::=|=(?!=))");
     private static final List<String> BUILTIN_SYMBOLS = discoverBuiltinSymbols();
+    private static final Set<String> BUILTIN_SYMBOL_NAMES = discoverBuiltinSymbolNames();
+    // Symja 3.1.1 stores System symbols under lower-case keys when its global
+    // PARSER_USE_LOWERCASE_SYMBOLS setting is enabled. Re-key the same symbols
+    // with their Java field names for exact Mathematica symbol resolution.
+    private static final Context MMA_SYSTEM_CONTEXT = discoverMmaSystemContext();
 
     private ExprEvaluator evaluator;
+    private ContextPath nativeContextPath;
+    private ContextPath mmaContextPath;
     private final Set<String> userSymbols = new TreeSet<>();
 
     private SymjaBridge() {
@@ -53,19 +62,25 @@ public final class SymjaBridge {
         // learned by this bridge before replacing the engine, or :SymjaReset could
         // leave stale assignments/DownValues behind in a reused context.
         if (evaluator != null) {
+            EvalEngine engine = evaluator.getEvalEngine();
+            // Clear through the exact-case System context so a user symbol such as
+            // `square` cannot resolve to Symja's lower-case-keyed built-in `Square`.
+            engine.setContextPath(createMmaContextPath(engine.getContextPath()));
+            engine.setRelaxedSyntax(false);
+            EvalEngine.setReset(engine);
             for (String name : userSymbols) {
-                // Never clear built-in symbols (e.g. Integrate, Pi, or D).
-                if (BUILTIN_SYMBOLS.contains(name)) {
-                    continue;
-                }
                 try {
-                    evaluator.eval("ClearAll(" + name + ")");
+                    ExprParser clearParser = new ExprParser(
+                            engine, ExprParserFactory.MMA_STYLE_FACTORY, false);
+                    evaluator.eval(clearParser.parse("ClearAll[" + name + "]"));
                 } catch (Exception ignored) {
                     // A fresh engine is still created below; ignore cleanup errors.
                 }
             }
         }
         evaluator = new ExprEvaluator(false, (short) 100);
+        nativeContextPath = evaluator.getEvalEngine().getContextPath();
+        mmaContextPath = createMmaContextPath(nativeContextPath);
         userSymbols.clear();
     }
 
@@ -73,9 +88,11 @@ public final class SymjaBridge {
     private ObjectNode checkSyntax(String code, String mode) {
         ObjectNode result = JSON.createObjectNode();
         ArrayNode diagnostics = result.putArray("diagnostics");
+        EvalEngine engine = evaluator.getEvalEngine();
+        boolean previousRelaxedSyntax = engine.isRelaxedSyntax();
+        ContextPath previousContextPath = engine.getContextPath();
         try {
-            EvalEngine engine = evaluator.getEvalEngine();
-            EvalEngine.setReset(engine);
+            prepareEngine(mode);
             ExprParser parser;
             if ("native".equals(mode)) {
                 parser = new ExprParser(engine, ExprParserFactory.RELAXED_STYLE_FACTORY, true);
@@ -103,13 +120,35 @@ public final class SymjaBridge {
             String message = error.getMessage();
             result.put("error", message == null || message.isBlank()
                     ? error.getClass().getSimpleName() : message);
+        } finally {
+            engine.setContextPath(previousContextPath);
+            engine.setRelaxedSyntax(previousRelaxedSyntax);
         }
         return result;
     }
 
-    private IExpr parse(String code, String mode) throws SyntaxError {
+    private static boolean relaxedSyntaxForMode(String mode) {
+        if ("native".equals(mode)) {
+            return true;
+        }
+        if ("mma".equals(mode)) {
+            return false;
+        }
+        throw new IllegalArgumentException("Unknown syntax mode '" + mode + "' (expected native or mma)");
+    }
+
+    /** Select both symbol lookup and context keys for the requested syntax. */
+    private EvalEngine prepareEngine(String mode) {
         EvalEngine engine = evaluator.getEvalEngine();
+        boolean relaxedSyntax = relaxedSyntaxForMode(mode);
+        engine.setContextPath(relaxedSyntax ? nativeContextPath : mmaContextPath);
+        engine.setRelaxedSyntax(relaxedSyntax);
         EvalEngine.setReset(engine);
+        return engine;
+    }
+
+    private IExpr parse(String code, String mode) throws SyntaxError {
+        EvalEngine engine = prepareEngine(mode);
         if ("native".equals(mode)) {
             ExprParser parser = new ExprParser(engine, ExprParserFactory.RELAXED_STYLE_FACTORY, true);
             return parser.parse(code);
@@ -122,6 +161,7 @@ public final class SymjaBridge {
     }
 
     private IExpr evaluate(String code, String mode) throws SyntaxError {
+        prepareEngine(mode);
         if ("native".equals(mode)) {
             return evaluator.eval(code);
         }
@@ -144,14 +184,27 @@ public final class SymjaBridge {
         return expression.toString();
     }
 
-    private void rememberDefinitions(String code) {
+    private void rememberDefinitions(String code, String mode) {
         Matcher matcher = DEFINITION_NAME.matcher(code);
         while (matcher.find()) {
             String name = matcher.group(1);
-            if (name != null && !name.isBlank()) {
-                userSymbols.add(name);
+            if (name == null || name.isBlank() || isBuiltinSymbolName(name, mode)) {
+                continue;
             }
+            // Relaxed Symja normalizes multi-character identifiers to lowercase.
+            if ("native".equals(mode) && name.length() > 1) {
+                name = name.toLowerCase(java.util.Locale.ROOT);
+            }
+            userSymbols.add(name);
         }
+    }
+
+    private static boolean isBuiltinSymbolName(String name, String mode) {
+        if ("native".equals(mode) && name.length() > 1) {
+            // BUILTIN_SYMBOLS uses a case-insensitive comparator, matching native lookup.
+            return BUILTIN_SYMBOLS.contains(name);
+        }
+        return BUILTIN_SYMBOL_NAMES.contains(name);
     }
 
     private List<String> completions(String prefix) {
@@ -166,6 +219,56 @@ public final class SymjaBridge {
         }
         matches.sort(String.CASE_INSENSITIVE_ORDER);
         return matches;
+    }
+
+    private static Set<String> discoverBuiltinSymbolNames() {
+        Set<String> names = new TreeSet<>();
+        for (Field field : S.class.getFields()) {
+            if (!Modifier.isStatic(field.getModifiers())
+                    || !ISymbol.class.isAssignableFrom(field.getType())) {
+                continue;
+            }
+            try {
+                ISymbol symbol = (ISymbol) field.get(null);
+                if (symbol != null && symbol.getContext().isSystem()) {
+                    names.add(field.getName());
+                }
+            } catch (IllegalAccessException error) {
+                throw new ExceptionInInitializerError(error);
+            }
+        }
+        return names;
+    }
+
+    private static Context discoverMmaSystemContext() {
+        Context context = new Context(Context.SYSTEM_CONTEXT_NAME);
+        for (Field field : S.class.getFields()) {
+            if (!Modifier.isStatic(field.getModifiers())
+                    || !ISymbol.class.isAssignableFrom(field.getType())) {
+                continue;
+            }
+            String name = field.getName();
+            if (!name.matches("[\\p{L}$][\\p{L}\\p{N}$]*")) {
+                continue;
+            }
+            try {
+                ISymbol symbol = (ISymbol) field.get(null);
+                if (symbol != null && symbol.getContext().isSystem()) {
+                    context.put(name, symbol);
+                }
+            } catch (IllegalAccessException error) {
+                throw new ExceptionInInitializerError(error);
+            }
+        }
+        return context;
+    }
+
+    private static ContextPath createMmaContextPath(ContextPath source) {
+        ContextPath path = source.copy();
+        if (!path.setContext(Context.SYSTEM_CONTEXT_NAME, MMA_SYSTEM_CONTEXT)) {
+            throw new IllegalStateException("Could not install the exact-case Symja System context");
+        }
+        return path;
     }
 
     private static List<String> discoverBuiltinSymbols() {
@@ -215,7 +318,7 @@ public final class SymjaBridge {
                             String code = request.path("code").asText("");
                             String mode = request.path("mode").asText("native");
                             IExpr result = bridge.evaluate(code, mode);
-                            bridge.rememberDefinitions(code);
+                            bridge.rememberDefinitions(code, mode);
                             response.put("result", result == null ? "" : result.toString());
                             if (request.path("renderLatex").asBoolean(false)) {
                                 response.put("latex", bridge.toLatex(result));
