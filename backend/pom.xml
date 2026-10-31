@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.symjanvim</groupId><artifactId>symja-nvim</artifactId><version>1.0.0</version>
+  <name>Symja.nvim Java bridge</name>
+  <description>Persistent Symja evaluator and hover server for Neovim.</description>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <symja.groupId>org.matheclipse</symja.groupId>
+    <symja.artifactId>matheclipse-core</symja.artifactId>
+    <symja.version>3.1.1</symja.version>
+    <jackson.version>2.21.1</jackson.version><log4j.version>2.25.3</log4j.version>
+  </properties>
+  <dependencies>
+    <dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId><version>${jackson.version}</version></dependency>
+    <!-- Keep API and implementation aligned with Symja's parent BOM. -->
+    <dependency><groupId>org.apache.logging.log4j</groupId><artifactId>log4j-api</artifactId><version>${log4j.version}</version></dependency>
+    <dependency><groupId>org.apache.logging.log4j</groupId><artifactId>log4j-core</artifactId><version>${log4j.version}</version></dependency>
+  </dependencies>
+  <!-- Exactly one Symja source profile is normally active:
+       - Maven Central by default;
+       - a custom Maven repository when symja.repository.url is supplied;
+       - a local app bundle when symja.local.lib.dir is supplied.
+       The local-bundle build script compiles against every JAR in that folder
+       and resolves only this bridge's Jackson/Log4j support libraries with Maven. -->
+  <profiles>
+    <profile>
+      <id>symja-from-maven-central</id>
+      <activation><activeByDefault>true</activeByDefault></activation>
+      <dependencies>
+        <dependency><groupId>${symja.groupId}</groupId><artifactId>${symja.artifactId}</artifactId><version>${symja.version}</version></dependency>
+      </dependencies>
+    </profile>
+    <profile>
+      <id>symja-from-custom-maven-repository</id>
+      <activation><property><name>symja.repository.url</name></property></activation>
+      <repositories>
+        <repository>
+          <id>custom-symja-repository</id>
+          <url>${symja.repository.url}</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>true</enabled></snapshots>
+        </repository>
+      </repositories>
+      <dependencies>
+        <dependency><groupId>${symja.groupId}</groupId><artifactId>${symja.artifactId}</artifactId><version>${symja.version}</version></dependency>
+      </dependencies>
+    </profile>
+    <profile>
+      <id>symja-from-local-distribution</id>
+      <activation><property><name>symja.local.lib.dir</name></property></activation>
+      <!-- No Maven Symja dependency in this profile. backend/build.sh invokes
+           javac with the local distribution's complete lib/* classpath. -->
+    </profile>
+  </profiles>
+  <build>
+    <finalName>symja-nvim</finalName>
+    <plugins>
+      <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version></plugin>
+      <!-- Do not shade dependencies into one uber-JAR. Log4j API is a multi-release JAR;
+           keeping the original JARs intact is required for Java 9+ StackLocator classes. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId><artifactId>maven-dependency-plugin</artifactId><version>3.8.1</version>
+        <executions><execution><id>copy-runtime-dependencies</id><phase>package</phase><goals><goal>copy-dependencies</goal></goals>
+          <configuration>
+            <includeScope>runtime</includeScope>
+            <outputDirectory>${project.build.directory}/lib</outputDirectory>
+          </configuration>
+        </execution></executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

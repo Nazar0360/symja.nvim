@@ -1,0 +1,13 @@
+# Maven build output
+/backend/target/
+
+# Runtime and diagnostic output
+*.log
+*.tmp
+
+# Editor / OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

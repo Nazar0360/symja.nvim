@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  java-bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build bridge
+        run: ./backend/build.sh
+
+      - name: Test evaluator bridge
+        run: ./tests/smoke.sh
+
+      - name: Test LSP hover server
+        run: ./tests/lsp-smoke.sh
+
+      - name: Check shell scripts
+        run: |
+          bash -n install.sh backend/build.sh tests/smoke.sh tests/lsp-smoke.sh tests/latex-render-smoke.sh
+          sh -n backend/run.sh

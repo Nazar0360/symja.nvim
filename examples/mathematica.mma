@@ -1,0 +1,4 @@
+(* Mathematica-compatible syntax example *)
+a = 10;
+square[x_] := x^2;
+square[a + 2]
